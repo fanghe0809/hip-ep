@@ -1625,6 +1625,33 @@ static int launch(hipStream_t stream, const void *x, const void *w,
     // tile is better" and is really "the wide tile is broken". The unroll
     // comment in conv_tiled_kernel has the numbers. Reorder these rungs only
     // against a sweep taken with a kernel that does not spill.
+    if (pass == 1) {
+      // No tile covers the device, so the widest-first order above would leave
+      // most of it idle: a 256-channel 14x14 output is 4 blocks at 128x128 and
+      // 16 at 64x64. Take the tile that makes the most blocks, the wider one on
+      // a tie.
+      const auto blocksOf = [&](int64_t bm, int64_t bn) -> int64_t {
+        return ((pr.MPerGroup + bm - 1) / bm) * ((pr.Nout + bn - 1) / bn) *
+               pr.N * pr.group;
+      };
+      const int64_t b0 = tileFits(pr, 128, 128, 1) ? blocksOf(128, 128) : 0;
+      const int64_t b1 = tileFits(pr, 64, 64, 1) ? blocksOf(64, 64) : 0;
+      const int64_t b2 = (pr.MPerGroup >= 24 && tileFits(pr, 32, 128, 1))
+                             ? blocksOf(32, 128)
+                             : 0;
+      if (b0 > 0 && b0 >= b1 && b0 >= b2) {
+        launchTile<T, 128, 128, 8, 8>(stream, x, w, bias, y, pr);
+        break;
+      }
+      if (b1 > 0 && b1 >= b2) {
+        launchTile<T, 64, 64, 4, 4>(stream, x, w, bias, y, pr);
+        break;
+      }
+      if (b2 > 0) {
+        launchTile<T, 32, 128, 2, 8>(stream, x, w, bias, y, pr);
+        break;
+      }
+    }
     if (tileFits(pr, 128, 128, need)) {
       launchTile<T, 128, 128, 8, 8>(stream, x, w, bias, y, pr);
       break;
