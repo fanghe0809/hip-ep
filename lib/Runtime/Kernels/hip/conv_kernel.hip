@@ -1461,6 +1461,10 @@ template <>
 bool launchWmmaIfProfitable<__half>(hipStream_t stream, const void *x,
                                     const void *w, const void *bias, void *y,
                                     const ConvParams &pr, int64_t units) {
+  // The WMMA kernels are wave32 and exist only on RDNA; on a wave64 device they
+  // compile to a trap. Decline every shape so the caller's scalar rungs, which
+  // are templated on the element type, take fp16 there.
+  if (hipdnn_device_is_wave64()) return false;
   // Every coverage test below is in CUs. The rungs were originally calibrated
   // against deviceUnitCount()'s WGPs, which asked each tile for half the grid
   // the test was written to demand, and the effect was not that tiles were
