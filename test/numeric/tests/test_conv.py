@@ -130,3 +130,68 @@ class TestConv:
         )
         actual, expected = model_runner.run_sample(model, [x])
         compare_outputs(actual, expected, atol=1e-2, rtol=1e-2, cos_threshold=0.999)
+
+
+def _make_conv_model_nd(
+    dtype, n, in_c, h, w, out_c, k, stride=1, pad=None, group=1, bias=True, seed=11
+):
+    """2D Conv model in `dtype` (TensorProto FLOAT or FLOAT16), pad = k // 2 by default."""
+    np_dtype = np.float32 if dtype == TensorProto.FLOAT else np.float16
+    pad = k // 2 if pad is None else pad
+    oh = (h + 2 * pad - k) // stride + 1
+    ow = (w + 2 * pad - k) // stride + 1
+    rng = np.random.default_rng(seed)
+    wt = rng.uniform(-0.1, 0.1, [out_c, in_c // group, k, k]).astype(np_dtype)
+    inits = [numpy_helper.from_array(wt, name="weight")]
+    names = ["input", "weight"]
+    if bias:
+        inits.append(
+            numpy_helper.from_array(
+                rng.uniform(-0.1, 0.1, [out_c]).astype(np_dtype), name="bias"
+            )
+        )
+        names.append("bias")
+    node = helper.make_node(
+        "Conv",
+        names,
+        ["output"],
+        group=group,
+        kernel_shape=[k, k],
+        strides=[stride, stride],
+        pads=[pad] * 4,
+        dilations=[1, 1],
+    )
+    inp = helper.make_tensor_value_info("input", dtype, [n, in_c, h, w])
+    out = helper.make_tensor_value_info("output", dtype, [n, out_c, oh, ow])
+    return make_model_from_nodes([node], [inp], [out], initializers=inits), np_dtype
+
+
+class TestConvFewOutputChannels:
+    """Output-channel counts below the smallest scalar tile's 32 rows. These used
+    to fall back to the one-thread-per-output direct kernel; they now run on a
+    tile with dead rows, which must be zero-filled on load and skipped on store.
+    The shapes are large enough (>= 1M multiply-accumulates) to leave the direct
+    kernel behind."""
+
+    @pytest.mark.parametrize("dtype", [TensorProto.FLOAT, TensorProto.FLOAT16])
+    @pytest.mark.parametrize(
+        "n,in_c,hw,out_c,k,group",
+        [
+            (1, 64, 40, 3, 3, 1),  # single-digit channel count
+            (1, 256, 24, 16, 1, 1),  # 1x1
+            (1, 64, 32, 24, 3, 1),
+            (2, 48, 28, 30, 3, 1),  # batch > 1, one row short of a tile
+            (1, 64, 40, 24, 3, 2),  # grouped: 12 channels per group
+        ],
+    )
+    def test_conv_few_output_channels(
+        self, model_runner, dtype, n, in_c, hw, out_c, k, group
+    ):
+        model, np_dtype = _make_conv_model_nd(
+            dtype, n, in_c, hw, hw, out_c, k, group=group
+        )
+        rng = np.random.default_rng(9)
+        x = rng.uniform(-1.0, 1.0, [n, in_c, hw, hw]).astype(np_dtype)
+        actual, expected = model_runner.run_sample(model, [x])
+        tol = 1e-3 if dtype == TensorProto.FLOAT else 2e-2
+        compare_outputs(actual, expected, atol=tol, rtol=tol, cos_threshold=0.9999)
