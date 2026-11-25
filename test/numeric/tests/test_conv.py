@@ -166,6 +166,38 @@ def _make_conv_model_nd(
     return make_model_from_nodes([node], [inp], [out], initializers=inits), np_dtype
 
 
+class TestConvSplitK:
+    """Shapes whose tile grid is far short of the device: a long reduction over few
+    output positions. The kernel cuts the reduction across blocks and sums the
+    partial results in a second pass, so these check the partial sums, the bias
+    (added once, in the reduce) and the ragged edges of the last slice."""
+
+    @pytest.mark.parametrize("dtype", [TensorProto.FLOAT])
+    @pytest.mark.parametrize(
+        "n,in_c,hw,out_c,k,stride,group,bias",
+        [
+            (1, 512, 7, 512, 3, 1, 1, True),  # K = 4608 over 49 columns
+            (2, 256, 14, 256, 3, 1, 1, True),  # batch > 1
+            (1, 200, 9, 130, 3, 1, 1, True),  # ragged K and ragged M
+            (1, 128, 14, 128, 3, 1, 2, True),  # grouped
+            (1, 256, 28, 256, 3, 2, 1, True),  # stride 2
+            (1, 1024, 14, 256, 1, 1, 1, False),  # 1x1, no bias
+            (1, 512, 7, 2048, 1, 1, 1, True),  # 1x1, output narrower than a tile
+        ],
+    )
+    def test_conv_splitk(
+        self, model_runner, dtype, n, in_c, hw, out_c, k, stride, group, bias
+    ):
+        model, np_dtype = _make_conv_model_nd(
+            dtype, n, in_c, hw, hw, out_c, k, stride=stride, group=group, bias=bias
+        )
+        rng = np.random.default_rng(5)
+        x = rng.uniform(-1.0, 1.0, [n, in_c, hw, hw]).astype(np_dtype)
+        actual, expected = model_runner.run_sample(model, [x])
+        tol = 1e-3 if dtype == TensorProto.FLOAT else 2e-2
+        compare_outputs(actual, expected, atol=tol, rtol=tol, cos_threshold=0.9999)
+
+
 class TestConvFewOutputChannels:
     """Output-channel counts below the smallest scalar tile's 32 rows. These used
     to fall back to the one-thread-per-output direct kernel; they now run on a

@@ -12,6 +12,7 @@
 #include <hip/hip_bfloat16.h>
 #include <cstdint>
 #include <cstdio>
+#include <type_traits>
 
 // =============================================================================
 // Conv — general forward convolution (1D / 2D / 3D spatial)
@@ -1565,6 +1566,47 @@ static inline void logPick(const char *what, const ConvParams &pr) {
       (long long)pr.k1, (long long)pr.s0, (long long)pr.s1);
 }
 
+// Split-K limits: the fewest taps a slice may have, and the largest workspace a
+// split may ask for.
+//
+// Where the numbers come from. Both are tuned on one part, a 40-CU gfx1151, and
+// neither is derived from the hardware.
+//
+// kSplitMinTaps = 256: a slice shorter than this spends more on its block's
+// ramp-up and on the reduce kernel than the extra blocks return. Swept at 64,
+// 128 and 256 on eight fp32 convolutions (3x3 at 64/128/256/512 channels from
+// 56x56 down to 7x7, stride 2, batch 8, and the 3-channel stem), with the block
+// target held at 80. 256 was the best or within noise of the best on every
+// shape, and the only one that kept the 512-channel 7x7 shape at 0.169 ms
+// against 0.207 for 128 and 0.201 for 64. The runs were three rounds each, so
+// differences under a few percent are noise.
+//
+// The block target (2 per CU, in the split planners) was swept at 40, 80, 160
+// and 320 absolute blocks, i.e. 1, 2, 4 and 8 per CU, with the minimum at 128.
+// 320 over-split and lost 25-55% on the five single-batch 3x3 shapes, 40 was a
+// little slower than 80, and 80 and 160 were within a few percent of each other
+// except on the 512-channel 7x7 shape, which preferred 160. Two per CU was
+// kept. The sweep fixed the target in blocks, so scaling it with the CU count is
+// an extrapolation that has not been measured on any other part.
+//
+// These sweeps were fp32. The fp16 kernels use the same constants and were only
+// compared with split-K off, and at a few targets on ResNet-50, not swept shape
+// by shape.
+//
+// kSplitMaxWorkspace = 32 MB was set a priori and never varied. It bounds the
+// session scratch that the partial sums live in for the session's lifetime and
+// the traffic of writing and re-reading `split` fp32 copies of the output; it is
+// a footprint limit rather than a tuned value.
+//
+// TODO: re-derive all three per architecture before relying on them elsewhere.
+// Other gfx11.5 parts (gfx1150, gfx1152, gfx1153), gfx12 and CDNA differ in CU
+// count, per-CU throughput, cache size and memory bandwidth, which is what these
+// trade off against. The minimum slice length should follow per-CU throughput
+// and memory latency, and the workspace cap the last-level cache or memory
+// budget, instead of being fixed numbers.
+constexpr int64_t kSplitMinTaps = 256;
+constexpr int64_t kSplitMaxWorkspace = 32ll << 20;
+
 // Source of the partial-sum workspace: the caller's allocation callback, or
 // nothing, in which case split-K is simply not used.
 struct WorkspaceSource {
@@ -1868,6 +1910,95 @@ bool launchWmmaIfProfitable<__half>(hipStream_t stream, const void *x,
   return true;
 }
 
+// ---------------------------------------------------------------------------
+// Split-K for the scalar tiles
+// ---------------------------------------------------------------------------
+//
+// A convolution with few output positions and a long reduction -- a 3x3 over
+// 512 channels at 7x7 is K = 4608 for only 49 columns -- makes a handful of
+// blocks under every tile, so most of the device idles while each block walks
+// the whole reduction. Cutting the reduction across blockIdx.y turns that
+// length into parallelism: each slice writes a partial sum to the workspace and
+// a small reduce kernel adds them (and the bias).
+//
+// The cost is a round trip through the workspace and a second launch, so it is
+// only worth it when the tile grid is badly short of the device, and the slices
+// must stay long enough to amortise their own prologue.
+
+struct SplitPlan {
+  int tile = -1; // index into the candidate list below; -1 = do not split
+  int split = 1;
+  int64_t chunk = 0;
+};
+
+// Picks a tile and a split for a shape no tile covers on its own. Tiles are
+// tried widest first, and the first that reaches `target` blocks wins -- a wider
+// tile does more FMAs per LDS read -- otherwise the one that gets closest.
+// Tiles more than twice as wide as the output are skipped: a 128-column tile on
+// a 49-column output spends most of every block on columns that do not exist.
+// `*outBytes` is the workspace the returned plan needs.
+static SplitPlan planSplitK(const ConvParams &pr, int64_t cus,
+                            int64_t *outBytes) {
+  SplitPlan best;
+  *outBytes = 0;
+  if (pr.MPerGroup < 32 || pr.K < 2 * kSplitMinTaps) return best;
+  struct Cand {
+    int bm, bn;
+  };
+  static constexpr Cand kCands[] = {{128, 128}, {64, 64}, {32, 128}, {32, 32}};
+  const int64_t target = 2 * cus;
+  const int64_t bytesPerSlice = pr.N * pr.Cout * pr.Nout * 4;
+  int64_t bestBlocks = 0;
+  for (int id = 0; id < 4; ++id) {
+    const Cand &c = kCands[id];
+    if (pr.MPerGroup < c.bm) continue;
+    if (c.bn > 2 * pr.Nout) continue;
+    const int64_t blocks = ((pr.MPerGroup + c.bm - 1) / c.bm) *
+                           ((pr.Nout + c.bn - 1) / c.bn) * pr.N * pr.group;
+    int64_t s = (target + blocks - 1) / blocks;
+    const int64_t maxSplit = pr.K / kSplitMinTaps > 1 ? pr.K / kSplitMinTaps : 1;
+    if (s > maxSplit) s = maxSplit;
+    while (s > 1 && s * bytesPerSlice > kSplitMaxWorkspace) --s;
+    int64_t chunk = (pr.K + s - 1) / s;
+    chunk = (chunk + kBK - 1) / kBK * kBK; // a multiple of BK: see the kernel
+    s = (pr.K + chunk - 1) / chunk;
+    if (blocks * s > bestBlocks) {
+      bestBlocks = blocks * s;
+      best.tile = id;
+      best.split = static_cast<int>(s);
+      best.chunk = chunk;
+    }
+    if (blocks * s >= target) break;
+  }
+  if (best.tile < 0 || best.split <= 1) return SplitPlan{};
+  *outBytes = best.split * bytesPerSlice;
+  return best;
+}
+
+template <typename T>
+static void launchSplitK(hipStream_t stream, const void *x, const void *w,
+                         const void *bias, void *y, const ConvParams &pr,
+                         const SplitPlan &plan, float *ws) {
+  switch (plan.tile) {
+  case 0:
+    launchTile<T, 128, 128, 8, 8>(stream, x, w, bias, y, pr, plan.split,
+                                  plan.chunk, ws);
+    break;
+  case 1:
+    launchTile<T, 64, 64, 4, 4>(stream, x, w, bias, y, pr, plan.split,
+                                plan.chunk, ws);
+    break;
+  case 2:
+    launchTile<T, 32, 128, 2, 8>(stream, x, w, bias, y, pr, plan.split,
+                                 plan.chunk, ws);
+    break;
+  default:
+    launchTile<T, 32, 32, 2, 2>(stream, x, w, bias, y, pr, plan.split,
+                                plan.chunk, ws);
+    break;
+  }
+}
+
 // Whether a convolution is the plain GEMM conv1x1_wmma_kernel computes: unit
 // stride, no padding, so the output grid is the input grid and X is the B
 // matrix as it lies. A is read with 16-byte loads and B with up to 16-byte ones,
@@ -1953,6 +2084,23 @@ static int launch(hipStream_t stream, const void *x, const void *w,
         fprintf(stderr, "[custom_kernels] hip_conv 1x1 launch failed: %s\n",
                 hipGetErrorString(cerr));
       return static_cast<int>(cerr);
+    }
+  }
+
+  // Split-K, for the shapes no tile covers on its own. fp16 has its own
+  // kernels below and is not handled here.
+  if constexpr (!std::is_same<T, __half>::value) {
+    int64_t wsBytes = 0;
+    const SplitPlan plan = planSplitK(pr, units * cusPerUnit(), &wsBytes);
+    if (plan.tile >= 0) {
+      if (float *ws = wsrc.get(static_cast<size_t>(wsBytes))) {
+        launchSplitK<T>(stream, x, w, bias, y, pr, plan, ws);
+        const hipError_t serr = hipGetLastError();
+        if (serr != hipSuccess)
+          fprintf(stderr, "[custom_kernels] hip_conv split-K launch failed: %s\n",
+                  hipGetErrorString(serr));
+        return static_cast<int>(serr);
+      }
     }
   }
 
