@@ -172,7 +172,7 @@ class TestConvSplitK:
     partial results in a second pass, so these check the partial sums, the bias
     (added once, in the reduce) and the ragged edges of the last slice."""
 
-    @pytest.mark.parametrize("dtype", [TensorProto.FLOAT])
+    @pytest.mark.parametrize("dtype", [TensorProto.FLOAT, TensorProto.FLOAT16])
     @pytest.mark.parametrize(
         "n,in_c,hw,out_c,k,stride,group,bias",
         [
