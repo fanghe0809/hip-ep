@@ -25,6 +25,7 @@
 #include "mlir/Dialect/Arith/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Bufferization/Pipelines/Passes.h"
+#include "mlir/Dialect/Bufferization/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/Dialect/Bufferization/Transforms/FuncBufferizableOpInterfaceImpl.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlow.h"
@@ -97,6 +98,7 @@ int main(int argc, char **argv) {
 
   mlir::arith::registerBufferizableOpInterfaceExternalModels(registry);
   mlir::arith::registerBufferDeallocationOpInterfaceExternalModels(registry);
+  mlir::bufferization::registerBufferizableOpInterfaceExternalModels(registry);
   mlir::bufferization::func_ext::registerBufferizableOpInterfaceExternalModels(
       registry);
   mlir::scf::registerBufferizableOpInterfaceExternalModels(registry);
@@ -109,6 +111,9 @@ int main(int argc, char **argv) {
   // the tool and the EP.
   mlir::hip::registerHipBufferizableOpInterfaceModels(registry);
   mlir::hipsr::registerBufferizableOpInterfaceExternalModels(registry);
+  // Same as hip::compiler::registerAllDialects: the hip.cast canonicalizer
+  // needs the tensor view ops' ElementMoveOpInterface models.
+  mlir::hip::registerElementMoveExternalModels(registry);
 
   // Registers every nameable HIP / pipeline / standard-MLIR pass the tool and
   // the EP share. Defined once (InitAllPasses.h) so the two never drift; see

@@ -168,7 +168,7 @@ func.func @reciprocal(%ctx: !hip.context, %x: tensor<2x8xf16>,
 
 // hip.cast is same-shape; float->float and int->float are tosa.cast.
 // CHECK-LABEL: func.func @cast_f32_to_f16
-// CHECK: tosa.cast %arg1 : (tensor<2x8xf32>) -> tensor<2x8xf16>
+// CHECK: tosa.cast %arg1 input_unsigned(false) : (tensor<2x8xf32>) -> tensor<2x8xf16>
 // CHECK-NOT: hip.cast
 func.func @cast_f32_to_f16(%ctx: !hip.context, %x: tensor<2x8xf32>,
                             %init: tensor<2x8xf16>) -> tensor<2x8xf16>
@@ -180,7 +180,7 @@ func.func @cast_f32_to_f16(%ctx: !hip.context, %x: tensor<2x8xf32>,
 }
 
 // CHECK-LABEL: func.func @cast_i8_to_f32
-// CHECK: tosa.cast %arg1 : (tensor<4xi8>) -> tensor<4xf32>
+// CHECK: tosa.cast %arg1 input_unsigned(false) : (tensor<4xi8>) -> tensor<4xf32>
 // CHECK-NOT: hip.cast
 func.func @cast_i8_to_f32(%ctx: !hip.context, %x: tensor<4xi8>,
                            %init: tensor<4xf32>) -> tensor<4xf32>
@@ -194,7 +194,7 @@ func.func @cast_i8_to_f32(%ctx: !hip.context, %x: tensor<4xi8>,
 // ONNX Cast truncates float->int, while tosa.cast rounds to nearest even:
 // emit rocMLIR's truncating fp_to_int_cast.
 // CHECK-LABEL: func.func @cast_f32_to_i8
-// CHECK: tosa.custom %arg1 {{.*}}operator_name = "fp_to_int_cast"
+// CHECK: tosa.custom %arg1 {{.*}}operator_name("fp_to_int_cast")
 // CHECK-NOT: hip.cast
 func.func @cast_f32_to_i8(%ctx: !hip.context, %x: tensor<2x8xf32>,
                            %init: tensor<2x8xi8>) -> tensor<2x8xi8>
@@ -206,7 +206,7 @@ func.func @cast_f32_to_i8(%ctx: !hip.context, %x: tensor<2x8xf32>,
 }
 
 // CHECK-LABEL: func.func @cast_ui8_to_f32
-// CHECK: tosa.custom %arg1 {{.*}}operator_name = "unsigned_cast"
+// CHECK: tosa.custom %arg1 {{.*}}operator_name("unsigned_cast")
 // CHECK-NOT: hip.cast
 func.func @cast_ui8_to_f32(%ctx: !hip.context, %x: tensor<4xui8>,
                             %init: tensor<4xf32>) -> tensor<4xf32>
@@ -215,6 +215,23 @@ func.func @cast_ui8_to_f32(%ctx: !hip.context, %x: tensor<4xui8>,
                       outs(%init : tensor<4xf32>) {to = 1 : i64}
                       : tensor<4xf32>
   return %r : tensor<4xf32>
+}
+
+// A one-element zero point cast to the scalar its reader expects: the unit
+// tensor is reshaped to rank 0, then cast.
+// CHECK-LABEL: func.func @cast_ui8_unit_to_f32_scalar
+// CHECK: %[[R:.*]] = tosa.reshape %arg1
+// CHECK-SAME: -> tensor<i8>
+// CHECK: tosa.custom %[[R]] {{.*}}operator_name("unsigned_cast")
+// CHECK-SAME: -> tensor<f32>
+// CHECK-NOT: hip.cast
+func.func @cast_ui8_unit_to_f32_scalar(%ctx: !hip.context, %x: tensor<1xui8>,
+                                       %init: tensor<f32>) -> tensor<f32>
+    attributes {rock.kernel} {
+  %r = hip.cast(%ctx) ins(%x : tensor<1xui8>)
+                      outs(%init : tensor<f32>) {to = 1 : i64}
+                      : tensor<f32>
+  return %r : tensor<f32>
 }
 
 // CHECK-LABEL: func.func @cast_outlined_kernel
@@ -229,7 +246,7 @@ func.func @cast_outlined_kernel(%x: tensor<2x8xf32>, %init: tensor<2x8xf16>)
   return %r : tensor<2x8xf16>
 }
 
-// The shape hip-fuse-rocmlir actually produces: the !hip.context is a
+// The shape the rocMLIR fusion actually produces: the !hip.context is a
 // ub.poison materialized inside the outlined kernel rather than a block
 // argument. The ConversionTarget marks ub.poison legal so it survives as dead
 // IR for the canonicalizer to drop, instead of failing legalization.
@@ -309,4 +326,18 @@ func.func @cast_dynamic_shape(%ctx: !hip.context, %x: tensor<?x8xf32>,
                       outs(%init : tensor<?x8xf16>) {to = 10 : i64}
                       : tensor<?x8xf16>
   return %r : tensor<?x8xf16>
+}
+
+// -----
+
+// Only a one-element tensor may change rank; any other shape change is
+// rejected.
+func.func @cast_nonunit_shape_change(%ctx: !hip.context, %x: tensor<4xf32>,
+                                     %init: tensor<2x2xf16>)
+    -> tensor<2x2xf16> attributes {rock.kernel} {
+  // expected-error @+1 {{failed to legalize operation 'hip.cast'}}
+  %r = hip.cast(%ctx) ins(%x : tensor<4xf32>)
+                      outs(%init : tensor<2x2xf16>) {to = 10 : i64}
+                      : tensor<2x2xf16>
+  return %r : tensor<2x2xf16>
 }

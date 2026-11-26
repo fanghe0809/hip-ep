@@ -44,7 +44,7 @@
 // tosa.mul's verifier rejects a non-zero shift on float operands.
 // CHECK-LABEL: func.func @div_f32
 // CHECK: %[[RECIP:.*]] = tosa.reciprocal %arg2 : (tensor<2x8xf32>) -> tensor<2x8xf32>
-// CHECK: %[[SHIFT:.*]] = "tosa.const"() <{values = dense<0> : tensor<1xi8>}>
+// CHECK: %[[SHIFT:.*]] = tosa.const values(dense<0> : tensor<1xi8>)
 // CHECK: tosa.mul %arg1, %[[RECIP]], %[[SHIFT]] : (tensor<2x8xf32>, tensor<2x8xf32>, tensor<1xi8>) -> tensor<2x8xf32>
 // CHECK-NOT: hip.div
 func.func @div_f32(%ctx: !hip.context, %x: tensor<2x8xf32>, %y: tensor<2x8xf32>,
@@ -114,7 +114,7 @@ func.func @div_broadcast_divisor(%ctx: !hip.context, %x: tensor<4x8xf16>,
 // way ONNX does, so the rank-0 divisor is reshaped to 1x1x1x1 before TOSA can
 // broadcast it, and the whole division collapses to a single reciprocal.
 // CHECK-LABEL: func.func @div_rank_extending
-// CHECK: %[[SHAPE:.*]] = tosa.const_shape {values = dense<1> : tensor<4xindex>}
+// CHECK: %[[SHAPE:.*]] = tosa.const_shape values(dense<1> : tensor<4xindex>)
 // CHECK: %[[RESHAPED:.*]] = tosa.reshape %arg2, %[[SHAPE]] : (tensor<f16>, !tosa.shape<4>) -> tensor<1x1x1x1xf16>
 // CHECK: %[[RECIP:.*]] = tosa.reciprocal %[[RESHAPED]] : (tensor<1x1x1x1xf16>) -> tensor<1x1x1x1xf16>
 // CHECK: tosa.mul %arg1, %[[RECIP]], %{{.*}} : (tensor<1x64x112x112xf16>, tensor<1x1x1x1xf16>, tensor<1xi8>) -> tensor<1x64x112x112xf16>
@@ -131,15 +131,15 @@ func.func @div_rank_extending(%ctx: !hip.context, %x: tensor<1x64x112x112xf16>,
 // -----
 
 //===----------------------------------------------------------------------===//
-// A divide behind an anchor, in the shape hip-fuse-rocmlir produces.
+// A divide behind an anchor, in the shape the rocMLIR fusion produces.
 //===----------------------------------------------------------------------===//
 
 // The reason for converting hip.div at all, and what separates it from the
-// shape ops: hip.div is already in FuseROCMlir's pointwise list, so a divide
-// after a matmul is outlined into the kernel whether or not it can be lowered.
-// Left unconverted it reaches rocMLIR as a hip op fed by a ub.poison context,
-// neither of which rocMLIR knows. The ub.poison and the tensor.empty buffers
-// this pass does not claim survive untouched for the canonicalizer.
+// shape ops: hip.div is already in the rocMLIR fusion's pointwise list, so a
+// divide after a matmul is outlined into the kernel whether or not it can be
+// lowered. Left unconverted it reaches rocMLIR as a hip op fed by a ub.poison
+// context, neither of which rocMLIR knows. The ub.poison and the tensor.empty
+// buffers this pass does not claim survive untouched for the canonicalizer.
 // CHECK-LABEL: func.func @rocMlir0
 // CHECK: ub.poison : !hip.context
 // CHECK: tensor.empty() : tensor<8x64x64xf32>

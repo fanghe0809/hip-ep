@@ -33,6 +33,7 @@
 #include "mlir/Dialect/Arith/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Bufferization/Pipelines/Passes.h"
+#include "mlir/Dialect/Bufferization/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/Dialect/Bufferization/Transforms/FuncBufferizableOpInterfaceImpl.h"
 #include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlow.h"
@@ -133,11 +134,18 @@ registerAllDialects(mlir::DialectRegistry &registry,
   mlir::tensor::registerInferTypeOpInterfaceExternalModels(registry);
   mlir::linalg::registerBufferizableOpInterfaceExternalModels(registry);
   mlir::scf::registerBufferizableOpInterfaceExternalModels(registry);
+  // bufferization.alloc_tensor, to_tensor and to_buffer, which tensor.empty
+  // and the function boundaries bufferize through.
+  mlir::bufferization::registerBufferizableOpInterfaceExternalModels(registry);
   mlir::bufferization::func_ext::registerBufferizableOpInterfaceExternalModels(
       registry);
   mlir::memref::registerAllocationOpInterfaceExternalModels(registry);
   mlir::hip::registerHipBufferizableOpInterfaceModels(registry);
   mlir::hipsr::registerBufferizableOpInterfaceExternalModels(registry);
+  // The hip.cast canonicalizer walks the tensor view ops through this
+  // interface, so it must be present in every pipeline, not only in the
+  // passes that declare it.
+  mlir::hip::registerElementMoveExternalModels(registry);
 }
 
 /// Load all required dialects into an MLIRContext.
