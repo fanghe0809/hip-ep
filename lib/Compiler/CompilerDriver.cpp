@@ -117,7 +117,10 @@ void dumpPreFusionIR(mlir::ModuleOp module,
      << llvm::join(fuseOpts.gemmGemmAccelTypes, ",")
      << " standalone-elementwise="
      << (fuseOpts.standaloneElementwise ? "true" : "false")
-     << " int4-weights=" << (fuseOpts.int4Weights ? "true" : "false") << "\n";
+     << " int4-weights=" << (fuseOpts.int4Weights ? "true" : "false")
+     << " attention=" << (fuseOpts.attention ? "true" : "false")
+     << " attention-f32-min-score-bytes=" << fuseOpts.attentionF32MinScoreBytes
+     << "\n";
   module->print(os);
 }
 #endif
@@ -150,6 +153,9 @@ std::string rocMlirArtifactTarget() {
     if (!target.empty() &&
         hip_env_is_on("HIPDNN_EP_ROCMLIR_NO_STANDALONE_ELEMENTWISE"))
       target += "+no-standalone-ew";
+    // Whether attention was fused is baked into the kernels the same way.
+    if (!target.empty() && hip_env_is_on("HIPDNN_EP_ROCMLIR_NO_ATTENTION"))
+      target += "+no-attention";
     return target;
   }
 #endif
@@ -486,6 +492,7 @@ bool CompilerDriver::runMLIRPasses(
       // i4 filter; the default perfConfig is one of them for f32.
       mlir::hip::AutotuneSpace int4Space;
       fuseOpts.int4Weights = mlir::hip::rocMlirAutotuneFromEnv(int4Space);
+      mlir::hip::setRocMlirAttentionOptions(fuseOpts);
       if (mlir::failed(headPm.run(module))) {
         error_message = "ONNX->HIP passes before the rocMLIR fusion failed";
         return false;

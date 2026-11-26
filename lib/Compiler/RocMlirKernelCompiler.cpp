@@ -385,6 +385,21 @@ std::string resolveRocMlirArch() {
 #endif
 }
 
+int64_t resolveRocMlirL2CacheBytes() {
+#if defined(HIPDNN_EP_LINK_HIP_HOST) && defined(HIPDNN_HIP_RUNTIME_LIB)
+  static HipGetDevicePropsFn getProps = loadHipGetDeviceProperties();
+  hipDeviceProp_t prop{};
+  if (getProps && getProps(&prop, 0) == hipSuccess && prop.l2CacheSize > 0)
+    return prop.l2CacheSize;
+#endif
+  return 0;
+}
+
+void setRocMlirAttentionOptions(FuseRocMlirAnchorPassOptions &options) {
+  options.attention = !hip_env_is_on("HIPDNN_EP_ROCMLIR_NO_ATTENTION");
+  options.attentionF32MinScoreBytes = resolveRocMlirL2CacheBytes();
+}
+
 std::vector<std::string> getRocMlirGemmAccelTypes(MLIRContext &context,
                                                   StringRef arch) {
   Builder b(&context);
