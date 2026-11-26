@@ -311,8 +311,9 @@ void check_rocmlir_arch(const std::string &recorded) {
   LOG(FATAL) << "Cached MLIR artifact was compiled with " << describe(recorded)
              << ", but this session requests " << describe(current)
              << " (HIPDNN_EP_ROCMLIR / HIPDNN_EP_ROCMLIR_AUTOTUNE / "
-                "HIPDNN_EP_ROCMLIR_NO_ATTENTION / ROCK_ARCH / active GPU). "
-                "Delete the model cache or EPContext model and recompile.";
+                "HIPDNN_EP_ROCMLIR_NO_ATTENTION / HIPDNN_EP_ROCMLIR_SPLITK / "
+                "ROCK_ARCH / active GPU). Delete the model cache "
+                "or EPContext model and recompile.";
 }
 } // anonymous namespace
 
