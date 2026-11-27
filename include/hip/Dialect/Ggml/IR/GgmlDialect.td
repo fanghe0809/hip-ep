@@ -15,6 +15,10 @@ def Ggml_Dialect : Dialect {
   let hasOperationAttrVerify = 1;
   let hasRegionArgAttrVerify = 1;
   let hasRegionResultAttrVerify = 1;
+  // Op formats print inherent attributes through attr-dict. LLVM marks this
+  // opt-out deprecated, so those formats need explicit bindings or prop-dict
+  // before it is removed.
+  let useStrictPropertiesInAssemblyFormat = 0;
   let summary = "Target-independent semantics imported from a GGML compute graph";
   let description = [{
     The GGML dialect is the stable compiler boundary between llama.cpp graph
