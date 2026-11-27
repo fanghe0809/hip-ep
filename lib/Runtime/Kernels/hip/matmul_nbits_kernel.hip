@@ -4265,6 +4265,9 @@ static int tuneGemvConfigU2(
     constexpr int ITERS  = 5;
     constexpr int kFloorIters = 15;  // extra iters for sub-0.1ms configs
 
+    // Same cold probing as the int4 GEMV tuner (see gemvEvictAlloc).
+    void* evict = gemvEvictAlloc();
+
     settleClock(ev0, ev1, stream, [&]{
         launchGemvConfigU2(best_id, stream, A, B, sc, zp, bi, out,
                            M, N, K, batch, bs);
@@ -4272,7 +4275,7 @@ static int tuneGemvConfigU2(
 
     for (int cid = 0; cid < kNumGemvConfigs; cid++) {
         float cfg_best_ms = timeConfigPeak(ev0, ev1, stream, WARMUP, ITERS,
-                                            kFloorIters, 0.1f, nullptr, [&]{
+                                            kFloorIters, 0.1f, evict, [&]{
             launchGemvConfigU2(cid, stream, A, B, sc, zp, bi, out,
                                M, N, K, batch, bs);
         });
@@ -4288,6 +4291,7 @@ static int tuneGemvConfigU2(
         }
     }
 
+    if (evict) (void)hipFree(evict);
     hipEventDestroy(ev0);
     hipEventDestroy(ev1);
 
