@@ -475,7 +475,8 @@ iterateKeys(const __half2 *const queryTile, const __half2 *__restrict__ keys,
 // Where a block finds the live key extent of its (sequence, query tile):
 // tileKvExtentKernel's output when it ran, or else the rows the cache update
 // wrote, which bound what any query can see, the same way that kernel derives
-// them. Reading those rows in the block saves a launch per attention call.
+// them, or else the whole window. Reading those rows in the block saves a
+// launch per attention call.
 struct KeyExtent {
   const int *kvMax;
   const int64_t *writtenRows;
@@ -1024,7 +1025,9 @@ int launchTile(const TileAttentionArgs &a, const DeviceInfo &device) {
       ncols2 > 1 && a.cacheCapacity % plan.nbatchFa == 0 ? plan.nbatchFa : 1;
 
   // With written rows each block finds its extent itself; only a mask scan
-  // needs the extent kernel.
+  // needs the extent kernel. One query of one sequence (decode) reads the
+  // whole window instead: there the scan's memset and launch cost more than
+  // the masked keys it would skip, and llama.cpp does not scan for it either.
   KeyExtent keyExtent{
       nullptr,
       a.writtenRows,
@@ -1033,7 +1036,7 @@ int launchTile(const TileAttentionArgs &a, const DeviceInfo &device) {
       static_cast<int32_t>(a.cacheCapacity),
       granularity};
   (void)hipGetLastError();
-  if (!a.writtenRows) {
+  if (!a.writtenRows && (a.queryTokens > 1 || a.batchCount > 1)) {
     keyExtent.kvMax = kvMax;
     const int64_t liveKeys = std::min<int64_t>(a.liveKeys, a.cacheCapacity);
     if (hipError_t status =
